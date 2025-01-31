@@ -1,0 +1,189 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from tqdm import tqdm
+import matplotlib.dates as mdates
+import logging
+
+# 配置日誌記錄
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 獲取股票數據函數，加入更詳細的錯誤處理
+def get_stock_data(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * 10)
+        hist = stock.history(start=start_date, end=end_date, actions=False)
+        return hist['Close']
+    except Exception as e:
+        logging.error(f"Error fetching data for {ticker}: {e}")
+        return None
+
+# 計算指數移動平均線 (EMA)
+def calculate_ema(data, period):
+    return data.ewm(span=period, adjust=False).mean()
+
+# 判斷股票價格是否高於 EMA
+def is_above_ema(ticker):
+    data = get_stock_data(ticker)
+    if data is None or len(data) < 200:  # 確保數據足夠長
+        return None
+
+    ema_20 = calculate_ema(data, 20)
+    ema_50 = calculate_ema(data, 50)
+    ema_200 = calculate_ema(data, 200)
+
+    above_20 = data > ema_20
+    above_50 = data > ema_50
+    above_200 = data > ema_200
+
+    return above_20, above_50, above_200
+
+# 計算市場廣度
+def calculate_market_breadth(tickers):
+    with ThreadPoolExecutor() as executor:
+        results = list(tqdm(executor.map(is_above_ema, tickers), total=len(tickers)))
+
+    # 過濾出有效結果
+    valid_results = [r for r in results if r is not None]
+
+    # 合併結果
+    df_20 = pd.concat([r[0] for r in valid_results], axis=1, join='inner')
+    df_50 = pd.concat([r[1] for r in valid_results], axis=1, join='inner')
+    df_200 = pd.concat([r[2] for r in valid_results], axis=1, join='inner')
+
+    # 計算高於 EMA 的股票百分比
+    percent_above_20 = df_20.mean(axis=1) * 100
+    percent_above_50 = df_50.mean(axis=1) * 100
+    percent_above_200 = df_200.mean(axis=1) * 100
+
+    return percent_above_20, percent_above_50, percent_above_200
+
+# 股票代碼列表
+nse_tickers = ["0001.HK", "0002.HK", "0003.HK", "0005.HK", "0006.HK", "0011.HK",
+               "0012.HK", "0016.HK", "0027.HK", "0066.HK", "0101.HK", "9901.HK",
+               "0175.HK", "0241.HK", "0267.HK", "0288.HK", "0291.HK", "0316.HK", 
+               "0322.HK", "0386.HK", "0388.HK", "0669.HK", "0688.HK", "0700.HK", 
+               "0762.HK", "0823.HK", "0836.HK", "0857.HK", "0868.HK", "0881.HK", 
+               "0883.HK", "0939.HK", "0941.HK", "0960.HK", "0968.HK", "0981.HK", 
+               "0992.HK", "1038.HK", "1044.HK", "1088.HK", "1093.HK", "1099.HK", 
+               "1109.HK", "1113.HK", "1177.HK", "1209.HK", "1211.HK", "1299.HK", 
+               "1378.HK", "1398.HK", "1810.HK", "1876.HK", "1928.HK", "1929.HK", 
+               "1997.HK", "2015.HK", "2020.HK", "2269.HK", "2313.HK", "2318.HK", 
+               "2319.HK", "2331.HK", "2359.HK", "2382.HK", "2388.HK", "2628.HK", 
+               "2688.HK", "2899.HK", "3690.HK", "3692.HK", "3968.HK", "3988.HK", 
+               "6098.HK", "6618.HK", "6690.HK", "6862.HK", "9618.HK", "9633.HK", 
+               "9888.HK", "9961.HK", "9988.HK", "9999.HK", "1024.HK"]
+
+# 計算市場廣度
+percent_above_20, percent_above_50, percent_above_200 = calculate_market_breadth(nse_tickers)
+
+# 獲取恆生指數 (^HSI) 的股價走勢
+hsi_data = get_stock_data('^HSI')
+
+# 計算 20 天、50 天和 200 天移動平均線
+if hsi_data is not None:
+    hsi_data = hsi_data.loc[percent_above_50.index.min():percent_above_50.index.max()]
+    ma_20 = hsi_data.rolling(window=20).mean()
+    ma_50 = hsi_data.rolling(window=50).mean()
+    ma_200 = hsi_data.rolling(window=200).mean()
+
+# 加載 VHSI 數據和 pe 數據
+vhsi_data_path = r'C:\temp\VHSI_22112024.xlsx'
+
+# 加載 VHSI 數據
+vhsi_df = pd.read_excel(vhsi_data_path, sheet_name='vhsi', parse_dates=['日期'])  # 假設日期列名為 "日期"
+vhsi_df.rename(columns={'日期': 'Date', '收市': 'VHSI'}, inplace=True)  # 重命名為英文以統一處理
+vhsi_df.set_index('Date', inplace=True)  # 將 Date 設為索引
+
+# 加載 pe 工作表數據作為 PE 數據
+pe_df = pd.read_excel(vhsi_data_path, sheet_name='pe')
+
+# 確保 'Date' 列是 datetime 格式
+if 'Date' in pe_df.columns:
+    pe_df['Date'] = pd.to_datetime(pe_df['Date'], errors='coerce')
+    pe_df.set_index('Date', inplace=True)  # 將 Date 設為索引
+else:
+    raise ValueError("The 'pe' sheet does not contain a 'Date' column.")
+
+# 繪圖
+fig, ax = plt.subplots(3, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
+
+# 繪製市場廣度指標圖，包括20日、50日和200日EMA的百分比
+ax[0].plot(percent_above_20.index, percent_above_20, color='blue', label='Percentage above 20-day EMA')
+ax[0].plot(percent_above_50.index, percent_above_50, color='green', label='Percentage above 50-day EMA')
+ax[0].plot(percent_above_200.index, percent_above_200, color='red', label='Percentage above 200-day EMA')
+ax[0].axhline(y=50, color='purple', linestyle='--', label='50% Level')
+ax[0].set_title('83 Stock')
+ax[0].set_ylabel('Percentage of Stocks Above EMA (%)')
+ax[0].legend()
+ax[0].grid(axis='y', color='black', linestyle='--', linewidth=0.8, alpha=0.7)
+
+# 繪製 HSI 和 VHSI 的合併圖表
+if hsi_data is not None:
+    ax1 = ax[1]  # 主圖：HSI
+    ax2 = ax1.twinx()  # 副圖：VHSI（右側 y 軸）
+
+    # 左側 HSI 的數據
+    ax1.plot(hsi_data.index, hsi_data, color='black', label='^HSI Price')
+    ax1.plot(hsi_data.index, ma_20, color='blue', linestyle='--', label='20-day MA')
+    ax1.plot(hsi_data.index, ma_50, color='orange', linestyle='--', label='50-day MA')
+    ax1.plot(hsi_data.index, ma_200, color='purple', linestyle='--', label='200-day MA')
+    ax1.set_ylabel('HSI Price', color='black')
+    ax1.tick_params(axis='y', labelcolor='black')
+
+    # 右側 VHSI 的數據
+    ax2.plot(vhsi_df.index, vhsi_df['VHSI'], color='green', label='VHSI')
+    ax2.set_ylabel('VHSI Level', color='green')
+    ax2.tick_params(axis='y', labelcolor='green')
+
+    # 圖例合併
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+    ax1.set_title('Hang Seng Index & VHSI')
+    ax1.grid(axis='y', color='black', linestyle='--', linewidth=0.8, alpha=0.7)
+
+# 繪製 PE 數據
+ax[2].plot(pe_df.index, pe_df['HSI'], label='HSI')
+ax[2].plot(pe_df.index, pe_df['Finance'], label='Finance')
+ax[2].plot(pe_df.index, pe_df['Utilities'], label='Utilities')
+ax[2].plot(pe_df.index, pe_df['Properties'], label='Properties')
+ax[2].plot(pe_df.index, pe_df['Commerical'], label='Commercial')
+ax[2].set_title('PE Range')
+ax[2].set_ylabel('PE')
+ax[2].legend()
+ax[2].grid(axis='y', color='black', linestyle='--', linewidth=0.8, alpha=0.7)
+ax[2].xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+ax[2].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+ax[2].tick_params(axis='x', rotation=45)
+
+# 設定 X 軸的日期格式為每 3 個月一個標籤
+ax[2].xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+ax[2].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+
+plt.tight_layout()
+
+# 保存圖表為 PNG 文件
+output_path = r'c:\temp\market_breadth_with_hsi_vhsi_combined.png'
+plt.savefig(output_path, dpi=300, bbox_inches='tight')
+logging.info(f"Chart saved as PNG file at: {output_path}")
+
+plt.show()
+
+vhsi_df.sort_index(inplace=True)
+
+# 提取最新的 VHSI 值和日期
+latest_vhsi_date = vhsi_df.index.max()  # 找到最新日期
+latest_vhsi_value = vhsi_df.loc[latest_vhsi_date, 'VHSI']  # 獲取最新日期對應的 VHSI 值
+
+# 打印最新的結果
+logging.info(f"Latest percentage above 20-day EMA: {percent_above_20.iloc[-1]:.2f}%")
+logging.info(f"Latest percentage above 50-day EMA: {percent_above_50.iloc[-1]:.2f}%")
+logging.info(f"Latest percentage above 200-day EMA: {percent_above_200.iloc[-1]:.2f}%")
+logging.info(f"Latest ^HSI close price: {hsi_data.iloc[-1]:.2f}" if hsi_data is not None else "HSI data not available")
+logging.info(f"Latest VHSI value ({latest_vhsi_date.strftime('%Y-%m-%d')}): {latest_vhsi_value:.2f}")
